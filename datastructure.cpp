@@ -1,123 +1,80 @@
 #include <iostream>
-#include <string>
 #include <queue>
-#include <stack>
-#include <unordered_map>
-#include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+#include <cstdlib>
+#include <atomic>
 using namespace std;
-struct Voter {
-    int voterID;
-    string name;
-    string district;
-    bool hasVoted;
-    Voter* next;
-};
-class VoterList {
+class PacketQueue {
+private:
+    queue<int> q;
+    mutex mtx;
+    condition_variable cv;
+    const int MAX_SIZE;
+    atomic<bool> running{true};
 public:
-    Voter* head;
-    VoterList() : head(NULL) {}
-    void addVoter(int id, string name, string district) {
-        Voter* newNode = new Voter{id, name, district, false, NULL};
-        if (!head)
-            head = newNode;
-        else {
-            Voter* temp = head;
-            while (temp->next) temp = temp->next;
-            temp->next = newNode;
+    PacketQueue(int maxSize) : MAX_SIZE(maxSize) {}
+    void addPacket(int packetId) {
+        unique_lock<mutex> lock(mtx);
+        if (!running) return;
+        if (q.size() >= MAX_SIZE) {
+            cout << "[CONGESTION] Queue full! Dropping packet " << packetId << endl;
+        } else {
+            q.push(packetId);
+            cout << "[ARRIVAL]   Packet " << packetId << " arrived. Queue size = " << q.size() << endl;
+            cv.notify_one(); // Wake up consumer
         }
     }
-    void displayVoters() {
-        Voter* temp = head;
-        while (temp) {
-            cout << "ID: " << temp->voterID << " | Name: " << temp->name
-                 << " | District: " << temp->district
-                 << " | Voted: " << (temp->hasVoted ? "Yes" : "No") << endl;
-            temp = temp->next;
+    int getPacket() {
+        unique_lock<mutex> lock(mtx);
+        cv.wait(lock, [this]() { return !q.empty() || !running; });
+        if (!q.empty()) {
+            int id = q.front();
+            q.pop();
+            return id;
         }
+        return -1; 
     }
+    void stop() {
+        unique_lock<mutex> lock(mtx);
+        running = false;
+        cv.notify_all(); 
+    }
+    size_t remainingPackets() {
+        lock_guard<mutex> lock(mtx);
+        return q.size();
+    }
+    bool isRunning() const { return running; }
 };
-class VoterHash {
-public:
-    unordered_map<int, bool> hashTable;
-    void registerVoter(int id) { hashTable[id] = false; }
-    bool verifyVoter(int id) { return hashTable.find(id) != hashTable.end(); }
-    bool hasVoted(int id) { return hashTable[id]; }
-    void markVoted(int id) { hashTable[id] = true; }
-};
-struct District {
-    string name;
-    int votes;
-    vector<District*> subDistricts;
-    District(string n) : name(n), votes(0) {}
-};
-void addSubDistrict(District* parent, District* child) {
-    parent->subDistricts.push_back(child);
+void packetProducer(PacketQueue& pq) {
+    int packetId = 1;
+    while (pq.isRunning()) {
+        this_thread::sleep_for(chrono::milliseconds(rand() % 800 + 200)); 
+        pq.addPacket(packetId++);
+    }
 }
-int countVotes(District* node) {
-    if (!node) return 0;
-    int total = node->votes;
-    for (auto child : node->subDistricts)
-        total += countVotes(child);
-    return total;
-}
-class PollingGraph {
-public:
-    int n;
-    vector<vector<int>> adj;
-    PollingGraph(int size) : n(size), adj(size) {}
-    void addConnection(int u, int v) {
-        adj[u].push_back(v);
-        adj[v].push_back(u);
-    }
-    void displayConnections() {
-        for (int i = 0; i < n; i++) {
-            cout << "Station " << i << " connected to: ";
-            for (int j : adj[i]) cout << j << " ";
-            cout << endl;
+void packetConsumer(PacketQueue& pq) {
+    while (pq.isRunning()) {
+        int packetId = pq.getPacket();
+        if (packetId == -1 && !pq.isRunning()) break;
+        if (packetId != -1) {
+            cout << "    [PROCESS] Packet " << packetId << " processed. Queue size = "
+                 << pq.remainingPackets() << endl;
+            this_thread::sleep_for(chrono::milliseconds(700));
         }
     }
-};
+}
 int main() {
-    VoterList voterList;
-    VoterHash voterHash;
-    queue<int> voteQueue;
-    stack<int> voteStack;
-    District* root = new District("Central Commission");
-    District* state1 = new District("State A");
-    District* district1 = new District("District X");
-    addSubDistrict(root, state1);
-    addSubDistrict(state1, district1);
-    PollingGraph graph(3);
-    graph.addConnection(0, 1);
-    graph.addConnection(1, 2);
-    voterList.addVoter(101, "Alice", "District X");
-    voterList.addVoter(102, "Bob", "District X");
-    voterList.addVoter(103, "Charlie", "District X");
-    voterHash.registerVoter(101);
-    voterHash.registerVoter(102);
-    voterHash.registerVoter(103);
-    voterList.displayVoters();
-    graph.displayConnections();
-    int voters[] = {101, 102, 103};
-    for (int id : voters) {
-        if (voterHash.verifyVoter(id) && !voterHash.hasVoted(id)) {
-            voteQueue.push(id);
-        }
-    }
-    while (!voteQueue.empty()) {
-        int voterID = voteQueue.front();
-        voteQueue.pop();
-        voteStack.push(voterID);
-        voterHash.markVoted(voterID);
-        district1->votes++;
-    }
-    if (!voteStack.empty()) {
-        int lastVote = voteStack.top();
-        voteStack.pop();
-        voterHash.hashTable[lastVote] = false;
-        district1->votes--;
-    }
-    cout << "Total votes in " << district1->name << ": " << district1->votes << endl;
-    cout << "Total votes in " << root->name << ": " << countVotes(root) << endl;
-    return 0;
-}
+    srand(time(0));
+    const int MAX_QUEUE_SIZE = 5;
+    const int SIMULATION_TIME = 10; 
+    PacketQueue pq(MAX_QUEUE_SIZE);
+    thread producer(packetProducer, ref(pq));
+    thread consumer(packetConsumer, ref(pq));this_thread::sleep_for(chrono::seconds(SIMULATION_TIME));
+    pq.stop();
+    if (producer.joinable()) producer.join();
+    if (consumer.joinable()) consumer.join();
+    cout << "\nSimulation ended. Remaining packets in queue: " << pq.remainingPackets() << endl;
+    return 0;}
